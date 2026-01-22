@@ -7,9 +7,12 @@ trimesh>=4.0.0
 omegaconf>=2.3.0
 einops>=0.8.0
 pymeshlab
+timm
+accelerate>=0.17.0
 
 # Optional: Background removal (can use ComfyUI's built-in if available)
 rembg
+comfy-env>=0.0.30
 
 diffusers
 pytorch-lightning
