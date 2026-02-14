@@ -1,16 +1,15 @@
 """UltraShape model and mesh loading nodes."""
 
 import os
-from comfy_env import isolated
 
 from common import (
     ULTRASHAPE_MODELS_DIR, CONFIG_DIR,
     COMFY_OUTPUT_DIR, ensure_ultrashape_checkpoint
 )
+from omegaconf import OmegaConf
 from wrappers import UltraShapeModelWrapper, UltraShapeMeshWrapper
 
 
-@isolated(env="ultrashape1", import_paths=["."])
 class UltraShapeLoadModel:
     """Load UltraShape refinement model (VAE + DiT + Conditioner)"""
 
@@ -184,7 +183,6 @@ class UltraShapeLoadModel:
         return (wrapper,)
 
 
-@isolated(env="ultrashape1", import_paths=["."])
 class UltraShapeLoadCoarseMesh:
     """Load and preprocess coarse mesh for refinement.
 

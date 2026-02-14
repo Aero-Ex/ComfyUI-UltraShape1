@@ -15,6 +15,11 @@ if not os.environ.get('PYTEST_CURRENT_TEST'):
 
     try:
         from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+        try:
+            from comfy_env import wrap_nodes
+            wrap_nodes()
+        except ImportError:
+            pass
         print("[ComfyUI-UltraShape1] [OK] Node classes imported successfully")
         INIT_SUCCESS = True
     except Exception as e:

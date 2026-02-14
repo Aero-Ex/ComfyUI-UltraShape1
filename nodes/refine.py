@@ -1,9 +1,6 @@
 """UltraShape mesh refinement node."""
 
-from comfy_env import isolated
 
-
-@isolated(env="ultrashape1", import_paths=["."])
 class UltraShapeRefine:
     """Refine coarse mesh using image-guided diffusion"""
 
