@@ -37,7 +37,7 @@ class UltraShapeRefine:
                octree_resolution=384, num_chunks=8000, mc_level=0.0, box_v=1.0,
                seed=42, remove_bg=False, sequential_cfg=False):
         # Check if disk offload mode
-        if getattr(model, 'disk_offload', False):
+        if model.get('disk_offload', False):
             return self._refine_disk_offload(
                 model, coarse_mesh, image, steps, guidance_scale,
                 octree_resolution, num_chunks, mc_level, box_v, seed, remove_bg,
@@ -58,6 +58,7 @@ class UltraShapeRefine:
         import torch
         from PIL import Image
         import comfy.utils
+        from .manager import get_manager
 
         def get_cuda_memory_str():
             """Get formatted CUDA memory usage string."""
@@ -90,10 +91,14 @@ class UltraShapeRefine:
             pil_image = pil_image.convert('RGBA')
 
         print(f"[UltraShape] Refining mesh: steps={steps}, guidance={guidance_scale}, octree_res={octree_resolution}")
-        print(f"[UltraShape] Before diffusion: {get_cuda_memory_str()}")
+        # Get manager and pipeline
+        manager = get_manager(model)
+        pipeline = manager.get_pipeline()
+        device = manager.device
+        dtype = manager.dtype
 
         # Setup generator for reproducibility
-        generator = torch.Generator(device=model.device).manual_seed(seed)
+        generator = torch.Generator(device=device).manual_seed(seed)
 
         # Progress bar
         pbar = comfy.utils.ProgressBar(steps)
@@ -111,10 +116,13 @@ class UltraShapeRefine:
 
         # Run diffusion refinement
         try:
-            with torch.autocast(device_type="cuda", dtype=model.dtype):
-                mesh, latents = model.pipeline(
+            # Move coarse mesh tensors to device
+            voxel_idx = coarse_mesh["voxel_idx"].to(device)
+
+            with torch.autocast(device_type="cuda", dtype=dtype):
+                mesh, latents = pipeline(
                     image=pil_image,
-                    voxel_cond=coarse_mesh.voxel_idx,
+                    voxel_cond=voxel_idx,
                     generator=generator,
                     box_v=box_v,
                     mc_level=mc_level,
@@ -133,7 +141,9 @@ class UltraShapeRefine:
             print(f"[UltraShape] Refinement complete: vertices={len(output_mesh.vertices)}, faces={len(output_mesh.faces)}")
             return (output_mesh,)
         finally:
-            # Memory cleanup after inference
+            # Memory cleanup after inference - don't cleanup the manager's cached models
+            # unless we're in a one-shot environment. comfy_env persistent workers 
+            # will keep the manager alive.
             gc.collect()
             torch.cuda.empty_cache()
             print(f"[UltraShape] After cleanup: {get_cuda_memory_str()}")
@@ -169,9 +179,24 @@ class UltraShapeRefine:
         print(f"[UltraShape] Disk offload mode - temp dir: {temp_dir}")
 
         try:
-            device = model.device
-            dtype = model.dtype
-            cfg = model.config
+            # Get checkpoint/config from model dict
+            checkpoint = model["checkpoint"]
+            config_file = model["config"]
+            dtype_str = model["dtype"]
+            attention_backend = model["attention_backend"]
+
+            import comfy.model_management as model_management
+            device = model_management.get_torch_device()
+            dtype = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }[dtype_str]
+
+            from common import ULTRASHAPE_MODELS_DIR, CONFIG_DIR
+            ckpt_path = os.path.join(ULTRASHAPE_MODELS_DIR, checkpoint)
+            config_path = os.path.join(CONFIG_DIR, config_file)
+            cfg = OmegaConf.load(config_path)
 
             # Prepare image
             img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
@@ -222,7 +247,7 @@ class UltraShapeRefine:
             # Load conditioner
             print("[UltraShape] Loading conditioner...")
             conditioner = instantiate_from_config(cfg.model.params.conditioner_config)
-            weights = torch.load(model.ckpt_path, map_location='cpu', weights_only=True)
+            weights = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             conditioner.load_state_dict(weights['conditioner'], strict=True)
             conditioner.eval().to(device, dtype=dtype)
             del weights['conditioner']
@@ -283,7 +308,7 @@ class UltraShapeRefine:
             # Load DiT
             print("[UltraShape] Loading DiT...")
             dit = instantiate_from_config(cfg.model.params.dit_cfg)
-            weights = torch.load(model.ckpt_path, map_location='cpu', weights_only=True)
+            weights = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             dit.load_state_dict(weights['dit'], strict=True)
             dit.eval().to(device, dtype=dtype)
             del weights['dit']
@@ -305,7 +330,7 @@ class UltraShapeRefine:
                 uncond = None
 
             # Prepare latents
-            voxel_cond = coarse_mesh.voxel_idx
+            voxel_cond = coarse_mesh["voxel_idx"].to(device)
             num_tokens = voxel_cond.shape[1]
             latent_dim = cfg.model.params.vae_config.params.embed_dim
             latents = torch.randn(
@@ -378,7 +403,7 @@ class UltraShapeRefine:
             # Load VAE
             print("[UltraShape] Loading VAE...")
             vae = instantiate_from_config(cfg.model.params.vae_config)
-            weights = torch.load(model.ckpt_path, map_location='cpu', weights_only=True)
+            weights = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             vae.load_state_dict(weights['vae'], strict=True)
             vae.eval().to(device, dtype=dtype)
             if hasattr(vae, 'enable_flashvdm_decoder'):

@@ -7,7 +7,7 @@ from common import (
     COMFY_OUTPUT_DIR, ensure_ultrashape_checkpoint
 )
 from omegaconf import OmegaConf
-from wrappers import UltraShapeModelWrapper, UltraShapeMeshWrapper
+# Removed wrappers import (no longer needed)
 
 
 class UltraShapeLoadModel:
@@ -79,7 +79,7 @@ class UltraShapeLoadModel:
         import torch
         import comfy.model_management as model_management
         from omegaconf import OmegaConf
-        from wrappers import UltraShapeModelWrapper
+        # from wrappers import UltraShapeModelWrapper  # Removed
 
         if checkpoint == "(select file)":
             raise ValueError("Please select a checkpoint file. Place .pt files in ComfyUI/models/UltraShape/")
@@ -107,80 +107,21 @@ class UltraShapeLoadModel:
         token_num = cfg.model.params.vae_config.params.num_latents
         voxel_res = cfg.model.params.vae_config.params.voxel_query_res
 
-        # Disk offload mode: don't load models, just store paths for lazy loading
-        if disk_offload:
-            print("[UltraShape] Disk offload mode enabled - models will be loaded on demand")
-            wrapper = UltraShapeModelWrapper(
-                pipeline=None,
-                config=cfg,
-                token_num=token_num,
-                voxel_res=voxel_res,
-                device=device,
-                dtype=torch_dtype,
-                disk_offload=True,
-                ckpt_path=ckpt_path,
-                config_path=config_path
-            )
-            print(f"[UltraShape] Config loaded: token_num={token_num}, voxel_res={voxel_res}")
-            return (wrapper,)
+        # Return a serializable config dict instead of a wrapper object
+        config_dict = {
+            "checkpoint": checkpoint,
+            "config": config,
+            "dtype": dtype,
+            "attention_backend": attention_backend,
+            "low_vram": low_vram,
+            "disk_offload": disk_offload,
+            # Metadata for downstream nodes
+            "token_num": token_num,
+            "voxel_res": voxel_res
+        }
 
-        # Normal mode: load all models to GPU
-        from ultrashape.pipelines import UltraShapePipeline
-        from ultrashape.utils.misc import instantiate_from_config
-
-        print("[UltraShape] Instantiating VAE...")
-        vae = instantiate_from_config(cfg.model.params.vae_config)
-
-        print("[UltraShape] Instantiating DiT...")
-        dit = instantiate_from_config(cfg.model.params.dit_cfg)
-
-        print("[UltraShape] Instantiating Conditioner...")
-        conditioner = instantiate_from_config(cfg.model.params.conditioner_config)
-
-        print("[UltraShape] Instantiating Scheduler & Processor...")
-        scheduler = instantiate_from_config(cfg.model.params.scheduler_cfg)
-        image_processor = instantiate_from_config(cfg.model.params.image_processor_cfg)
-
-        print(f"[UltraShape] Loading weights from {ckpt_path}...")
-        weights = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-
-        vae.load_state_dict(weights['vae'], strict=True)
-        dit.load_state_dict(weights['dit'], strict=True)
-        conditioner.load_state_dict(weights['conditioner'], strict=True)
-
-        vae.eval().to(device, dtype=torch_dtype)
-        dit.eval().to(device, dtype=torch_dtype)
-        conditioner.eval().to(device, dtype=torch_dtype)
-
-        # Enable flash decoder if available
-        if hasattr(vae, 'enable_flashvdm_decoder'):
-            vae.enable_flashvdm_decoder()
-            print("[UltraShape] FlashVDM decoder enabled")
-
-        pipeline = UltraShapePipeline(
-            vae=vae,
-            model=dit,
-            scheduler=scheduler,
-            conditioner=conditioner,
-            image_processor=image_processor
-        )
-
-        # Enable CPU offloading for low VRAM mode
-        if low_vram:
-            pipeline.enable_model_cpu_offload()
-            print("[UltraShape] Low VRAM mode enabled (CPU offloading)")
-
-        wrapper = UltraShapeModelWrapper(
-            pipeline=pipeline,
-            config=cfg,
-            token_num=token_num,
-            voxel_res=voxel_res,
-            device=device,
-            dtype=torch_dtype
-        )
-
-        print(f"[UltraShape] Model loaded: token_num={token_num}, voxel_res={voxel_res}")
-        return (wrapper,)
+        print(f"[UltraShape] Model config generated: {checkpoint}")
+        return (config_dict,)
 
 
 class UltraShapeLoadCoarseMesh:
@@ -260,7 +201,7 @@ class UltraShapeLoadCoarseMesh:
                   normalize_scale=0.99, num_sharp_points=204800, num_uniform_points=204800, num_latents=0):
         from ultrashape.surface_loaders import SharpEdgeSurfaceLoader
         from ultrashape.utils import voxelize_from_point
-        from wrappers import UltraShapeMeshWrapper
+        # from wrappers import UltraShapeMeshWrapper  # Removed
 
         # Resolve the mesh path
         resolved_path = self._resolve_mesh_path(mesh_path)
@@ -275,25 +216,37 @@ class UltraShapeLoadCoarseMesh:
             num_uniform_points=num_uniform_points,
         )
 
+        # Get device and dtype from comfy/model_management
+        import torch
+        import comfy.model_management as mm
+        device = mm.get_torch_device()
+        torch_dtype = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }.get(model["dtype"], torch.bfloat16)
+
         # Load and process surface
         surface = loader(resolved_path, normalize_scale=normalize_scale)
-        surface = surface.to(model.device, dtype=model.dtype)
+        surface = surface.to(device, dtype=torch_dtype)
 
         # Extract point cloud (first 3 channels)
         pc = surface[:, :, :3]  # [B, N, 3]
 
         # Use custom num_latents if specified, otherwise use config default
-        token_num = num_latents if num_latents > 0 else model.token_num
+        token_num = num_latents if num_latents > 0 else model["token_num"]
 
         # Voxelize
-        _, voxel_idx = voxelize_from_point(pc, token_num, resolution=model.voxel_res)
+        _, voxel_idx = voxelize_from_point(pc, token_num, resolution=model["voxel_res"])
 
-        wrapper = UltraShapeMeshWrapper(
-            surface=surface,
-            voxel_idx=voxel_idx,
-            mesh_path=resolved_path,
-            normalize_scale=normalize_scale
-        )
+        # Return a serializable dict containing tensors (moved to CPU/float32 for IPC)
+        # BF16 is not supported by NumPy-based IPC in comfy_env
+        mesh_dict = {
+            "surface": surface.cpu().float(),
+            "voxel_idx": voxel_idx.cpu().to(torch.int32), # voxel_idx is long, to(int32) is safe and smaller
+            "mesh_path": resolved_path,
+            "normalize_scale": normalize_scale
+        }
 
         print(f"[UltraShape] Mesh loaded: surface={surface.shape}, voxel_idx={voxel_idx.shape}")
-        return (wrapper,)
+        return (mesh_dict,)

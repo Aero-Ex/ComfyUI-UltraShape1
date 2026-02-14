@@ -4,7 +4,7 @@ python = "3.10"
 ComfyUI-GeometryPack = "PozzettiAndrea/ComfyUI-GeometryPack"
 
 [cuda]
-packages = ["cubvh", "sageattention"]
+packages = ["cubvh", "sageattention", "flash-attn"]
 
 [pypi-dependencies]
 trimesh = ">=4.0.0"
@@ -21,3 +21,6 @@ scikit-image = "*"
 opencv-python-headless = "*"
 onnxruntime = "*"
 transformers = "*"
+torch = "==2.8.0"
+torchvision = "==0.23.0"
+torchaudio = "==2.8.0"

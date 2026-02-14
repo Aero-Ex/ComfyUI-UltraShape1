@@ -42,14 +42,44 @@ from einops import rearrange
 from .moe_layers import MoEBlock
 from ...utils import logger, synchronize_timer, smart_load_model
 
+# Optimized attention selection
+_pytorch_sdpa = F.scaled_dot_product_attention
+HAS_SAGE_ATTN = False
+sageattn = None
+
+if os.environ.get('USE_SAGEATTN', '0') == '1':
+    try:
+        from sageattention import sageattn
+        HAS_SAGE_ATTN = True
+    except ImportError:
+        pass
+
 # flash_attn is optional - fallback to PyTorch SDPA if not available
 try:
     from flash_attn import flash_attn_varlen_func
     HAS_FLASH_ATTN = True
-except ImportError:
+except (ImportError, RuntimeError, OSError) as e:
     HAS_FLASH_ATTN = False
     flash_attn_varlen_func = None
-    print("[UltraShape] flash_attn not found, using PyTorch SDPA (may be slower for variable-length attention)")
+    # Only warn about flash_attn if we don't have SageAttention either
+    if not HAS_SAGE_ATTN:
+        print(f"[UltraShape] flash_attn failed to load: {e}. Falling back to standard attention.")
+
+def scaled_dot_product_attention(q, k, v, attn_mask=None, **kwargs):
+    """Unified attention entry point for DiT."""
+    global HAS_SAGE_ATTN
+    # SageAttention path (only for dense attention with no mask)
+    if HAS_SAGE_ATTN and attn_mask is None and q.dtype in (torch.float16, torch.bfloat16):
+        try:
+            # Sage expects [B, H, N, D] which is what we provide
+            return sageattn(q, k, v)
+        except (AssertionError, RuntimeError) as e:
+            # This can happen if GPU doesn't support the specific Sage kernel (e.g. needs SM 8.9)
+            HAS_SAGE_ATTN = False # Disable for future calls in this process
+            print(f"[UltraShape] SageAttention hardware check failed: {e}. Falling back to SDPA.")
+    
+    # Standard SDPA path
+    return _pytorch_sdpa(q, k, v, attn_mask=attn_mask, **kwargs)
 
 
 def modulate(x, shift, scale):
@@ -245,7 +275,7 @@ class CrossAttention(nn.Module):
             attn_mask = torch.where(attn_mask, torch.zeros_like(attn_mask, dtype=q.dtype),
                                     torch.full_like(attn_mask, float('-inf'), dtype=q.dtype))
 
-            context = F.scaled_dot_product_attention(
+            context = scaled_dot_product_attention(
                 q_t, k_t, v_t, attn_mask=attn_mask
             ).transpose(1, 2).reshape(b, s1, -1)
         else:
@@ -257,7 +287,7 @@ class CrossAttention(nn.Module):
                 q, k, v = map(lambda t: rearrange(t, 'b n h d -> b h n d', h=self.num_heads), (q, k, v))
                 
                 attn_mask = None
-                context = F.scaled_dot_product_attention(
+                context = scaled_dot_product_attention(
                     q, k, v, attn_mask=attn_mask
                 ).transpose(1, 2).reshape(b, s1, -1)
 
@@ -321,12 +351,7 @@ class Attention(nn.Module):
             k = apply_rotary_emb(k, rotary_cos, rotary_sin)
         # ==============================================================
 
-        with torch.backends.cuda.sdp_kernel(
-            enable_flash=True,
-            enable_math=False,
-            enable_mem_efficient=True
-        ):
-            x = F.scaled_dot_product_attention(q, k, v)
+            x = scaled_dot_product_attention(q, k, v)
             x = x.transpose(1, 2).reshape(B, N, -1)
 
         x = self.out_proj(x)

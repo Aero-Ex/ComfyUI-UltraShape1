@@ -32,3 +32,6 @@ __pycache__
 
 UltraShape-1.0-src
 node.zip
+
+_root_env
+_env_*
